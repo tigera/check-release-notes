@@ -4,6 +4,9 @@ const github = require('@actions/github');
 try {
     const labelName = core.getInput('label-name');
     const context = github.context;
+
+    console.log(context)
+
     const prNumber = context.pull_request.number;
     const prBaseName = context.base.repo.full_name;
     const prBody = context.pull_request.body;
