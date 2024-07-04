@@ -4,19 +4,26 @@ const github = require('@actions/github');
 try {
     const labelName = core.getInput('label-name');
     const context = github.context;
-    const prNumber = github.number;
+    const prNumber = context.pull_request.number;
+    const prBaseName = context.base.repo.full_name;
+    const prBody = context.pull_request.body;
 
-    const fullNameSplit = github.full_name.split("/")
+    const prBaseNameSplit = prBaseName.split("/");
 
     const { data: pullRequest } = octokit.rest.pulls.get({
-        owner: fullNameSplit[0],
-        repo: fullNameSplit[1],
+        owner: prBaseNameSplit[0],
+        repo: prBaseNameSplit[1],
         pull_number: prNumber,
     });
 
-    console.log(fullNameSplit);
+    console.log(pullRequest);
+
+    console.log(labelName)
+    console.log(context)
     console.log(prNumber)
-    console.log("Got information about" + pullRequest);
+    console.log(prBaseName)
+    console.log(prBody)
+
 
     // const payload = JSON.stringify(github.context.payload, undefined, 2)
     // console.log(`The event payload: ${payload}`);
