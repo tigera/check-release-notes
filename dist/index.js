@@ -31081,24 +31081,30 @@ var __webpack_exports__ = {};
 const core = __nccwpck_require__(3466);
 const github = __nccwpck_require__(5347);
 
+const re = new RegExp("(?<=```release-note\s*).*?(?=\s*```)");
+
 try {
     const labelName = core.getInput('label-name');
     const context = github.context;
-
-    console.log(context)
 
     const prNumber = context.payload.number;
     const labels = context.payload.pull_request.labels;
     const prBody = context.payload.pull_request.body;
 
-    console.log(labelName)
-    console.log(prNumber)
-    console.log(labels)
-    console.log(prBody)
+    const labels_names = labels.map(item => item.name)
 
+    if (labels_names.includes(labelName)) {
+        console.log("We have the label");
+        match = re.exec(prBody);
+        releaseNotes = match[0].trim();
+        if (releaseNotes.toUpperCase() == "TBD") {
+            core.setFailed("Release notes are still TBD")
+        }
+        if (releaseNotes == "") {
+            core.setFailed("Release notes are empty")
+        }
+    }
 
-    // const payload = JSON.stringify(github.context.payload, undefined, 2)
-    // console.log(`The event payload: ${payload}`);
 } catch (error) {
     core.setFailed(error.message);
 }
