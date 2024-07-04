@@ -8,7 +8,7 @@ try {
 
     const fullNameSplit = github.full_name.split("/")
 
-    const { data: pullRequest } = await octokit.rest.pulls.get({
+    const { data: pullRequest } = octokit.rest.pulls.get({
         owner: fullNameSplit[0],
         repo: fullNameSplit[1],
         pull_number: prNumber,
