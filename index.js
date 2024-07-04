@@ -7,24 +7,13 @@ try {
 
     console.log(context)
 
-    const prNumber = context.pull_request.number;
-    const prBaseName = context.base.repo.full_name;
-    const prBody = context.pull_request.body;
-
-    const prBaseNameSplit = prBaseName.split("/");
-
-    const { data: pullRequest } = octokit.rest.pulls.get({
-        owner: prBaseNameSplit[0],
-        repo: prBaseNameSplit[1],
-        pull_number: prNumber,
-    });
-
-    console.log(pullRequest);
+    const prNumber = context.payload.number;
+    const labels = context.payload.pull_request.labels;
+    const prBody = context.payload.pull_request.body;
 
     console.log(labelName)
-    console.log(context)
     console.log(prNumber)
-    console.log(prBaseName)
+    console.log(labels)
     console.log(prBody)
 
 
