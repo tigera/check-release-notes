@@ -2,14 +2,24 @@ const core = require('@actions/core');
 const github = require('@actions/github');
 
 try {
-  // `who-to-greet` input defined in action metadata file
-  const nameToGreet = core.getInput('who-to-greet');
-  console.log(`Hello ${nameToGreet}!`);
-  const time = (new Date()).toTimeString();
-  core.setOutput("time", time);
-  // Get the JSON webhook payload for the event that triggered the workflow
-  const payload = JSON.stringify(github.context.payload, undefined, 2)
-  console.log(`The event payload: ${payload}`);
+    const labelName = core.getInput('label-name');
+    const context = github.context;
+    const prNumber = github.number;
+
+    const fullNameSplit = github.full_name.split("/")
+
+    const { data: pullRequest } = await octokit.rest.pulls.get({
+        owner: fullNameSplit[0],
+        repo: fullNameSplit[1],
+        pull_number: prNumber,
+    });
+
+    console.log(fullNameSplit);
+    console.log(prNumber)
+    console.log("Got information about" + pullRequest);
+
+    // const payload = JSON.stringify(github.context.payload, undefined, 2)
+    // console.log(`The event payload: ${payload}`);
 } catch (error) {
-  core.setFailed(error.message);
+    core.setFailed(error.message);
 }

@@ -4,10 +4,10 @@ inputs:
   label-name:  # id of input
     description: 'The Github label that we want to check for'
     required: true
-    default: 'World'
+    default: 'release-note-required'
 outputs:
   time: # id of output
-    description: 'The time we greeted you'
+    description: 'The release notes that were found'
 runs:
   using: 'node20'
   main: 'dist/index.js'
