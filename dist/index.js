@@ -31103,6 +31103,8 @@ try {
         if (releaseNotes == "") {
             core.setFailed("Release notes are empty")
         }
+    } else {
+        console.log("Label " + labelName + " not present, skipping validation")
     }
 
 } catch (error) {
