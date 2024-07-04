@@ -16,6 +16,9 @@ try {
     if (labels_names.includes(labelName)) {
         console.log("We have the label");
         match = re.exec(prBody);
+        if (match == null) {
+            core.setFailed("No release notes found in PR body")
+        }
         releaseNotes = match[0].trim();
         if (releaseNotes.toUpperCase() == "TBD") {
             core.setFailed("Release notes are still TBD")
