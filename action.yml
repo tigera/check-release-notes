@@ -1,8 +1,8 @@
-name: 'Hello World'
-description: 'Greet someone and record the time'
+name: 'Validate release notes'
+description: 'Check if a specified label is present on a PR, and, if so, ensure release notes exist.'
 inputs:
-  who-to-greet:  # id of input
-    description: 'Who to greet'
+  label-name:  # id of input
+    description: 'The Github label that we want to check for'
     required: true
     default: 'World'
 outputs:
@@ -10,4 +10,4 @@ outputs:
     description: 'The time we greeted you'
 runs:
   using: 'node20'
-  main: 'index.js'
+  main: 'dist/index.js'
