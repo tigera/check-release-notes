@@ -31081,7 +31081,7 @@ var __webpack_exports__ = {};
 const core = __nccwpck_require__(3466);
 const github = __nccwpck_require__(5347);
 
-const re = new RegExp("(?<=```release-note\s*).*?(?=\s*```)");
+const re = new RegExp("(?<=```release-note\s*)(.*?)(?=\s*```)", 's');
 
 try {
     const labelName = core.getInput('label-name');
@@ -31096,6 +31096,7 @@ try {
     if (labels_names.includes(labelName)) {
         console.log("We have the label");
         match = re.exec(prBody);
+        console.log(match)
         if (match == null) {
             core.setFailed("No release notes found in PR body")
         }
