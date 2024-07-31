@@ -1,7 +1,7 @@
 const core = require('@actions/core');
 const github = require('@actions/github');
 
-const re = new RegExp("(?<=```release-note\s*).*?(?=\s*```)");
+const re = new RegExp("(?<=```release-note\s*)(.*?)(?=\s*```)", 's');
 
 try {
     const labelName = core.getInput('label-name');
