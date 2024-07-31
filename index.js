@@ -16,6 +16,7 @@ try {
     if (labels_names.includes(labelName)) {
         console.log("We have the label");
         match = re.exec(prBody);
+        console.log(match)
         if (match == null) {
             core.setFailed("No release notes found in PR body")
         }
