@@ -14,18 +14,19 @@ try {
     const labels_names = labels.map(item => item.name)
 
     if (labels_names.includes(labelName)) {
-        console.log("We have the label");
+        console.log("PR does contain the label " + labelName);
         match = re.exec(prBody);
         console.log(match)
         if (match == null) {
             core.setFailed("No release notes found in PR body")
-        }
-        releaseNotes = match[0].trim();
-        if (releaseNotes.toUpperCase() == "TBD") {
-            core.setFailed("Release notes are still TBD")
-        }
-        if (releaseNotes == "") {
-            core.setFailed("Release notes are empty")
+        } else {
+            releaseNotes = match[0].trim();
+            if (releaseNotes.toUpperCase() == "TBD") {
+                core.setFailed("Release notes are still TBD")
+            }
+            if (releaseNotes == "") {
+                core.setFailed("Release notes are empty")
+            }
         }
     } else {
         console.log("Label " + labelName + " not present, skipping validation")
