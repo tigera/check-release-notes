@@ -13,22 +13,33 @@ try {
 
     const labels_names = labels.map(item => item.name)
 
+    failureMessage = ""
+
     if (labels_names.includes(labelName)) {
-        console.log("PR does contain the label " + labelName);
         match = re.exec(prBody);
         if (match == null) {
-            core.setFailed("No release notes found in PR body")
+            failureMessage = "No release notes found in PR body"
         } else {
             releaseNotes = match[0].trim();
             if (releaseNotes.toUpperCase() == "TBD") {
-                core.setFailed("Release notes are still TBD")
+                failureMessage = "Release notes are still TBD"
             }
             if (releaseNotes == "") {
-                core.setFailed("Release notes are empty")
+                failureMessage = "Release notes are empty"
             }
         }
     } else {
         console.log("Label " + labelName + " not present, skipping validation")
+    }
+
+    if (failureMessage != "") {
+        if (context.payload.pull_request.draft == true) {
+            console.log("[draft] PR contained the following issue: " + failureMessage)
+        } else {
+            core.setFailed("An error was found: " + failureMessage)
+        }
+    } else {
+        console.log("No errors detected in release notes.")
     }
 
 } catch (error) {
