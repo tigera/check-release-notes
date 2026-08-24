@@ -10,17 +10,25 @@ const os = require('os');
 const TARGET = process.argv[2] || path.join(__dirname, 'dist', 'index.js');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'check-release-notes-'));
 const eventPath = path.join(tmp, 'event.json');
+const summaryPath = path.join(tmp, 'summary.md');
 
 let failures = 0;
 
 function run(payload, { label = 'release-note-required' } = {}) {
     fs.writeFileSync(eventPath, JSON.stringify(payload));
+    // The runner hands each step an empty file and reads it back afterwards.
+    fs.writeFileSync(summaryPath, '');
     const start = process.hrtime.bigint();
     let code = 0;
     let out = '';
     try {
         out = execFileSync('node', [TARGET], {
-            env: { ...process.env, GITHUB_EVENT_PATH: eventPath, 'INPUT_LABEL-NAME': label },
+            env: {
+                ...process.env,
+                GITHUB_EVENT_PATH: eventPath,
+                GITHUB_STEP_SUMMARY: summaryPath,
+                'INPUT_LABEL-NAME': label,
+            },
             encoding: 'utf8',
             timeout: 60000,
         });
@@ -28,7 +36,12 @@ function run(payload, { label = 'release-note-required' } = {}) {
         code = error.status === undefined ? 'TIMEOUT' : error.status;
         out = (error.stdout || '') + (error.stderr || '');
     }
-    return { code, out: out.trim(), ms: Number(process.hrtime.bigint() - start) / 1e6 };
+    return {
+        code,
+        out: out.trim(),
+        summary: fs.readFileSync(summaryPath, 'utf8'),
+        ms: Number(process.hrtime.bigint() - start) / 1e6,
+    };
 }
 
 function check(name, payload, expected, options = {}) {
@@ -36,6 +49,7 @@ function check(name, payload, expected, options = {}) {
     const maxMs = options.maxMs || 10000;
     const ok = result.code === expected.code &&
         result.out.includes(expected.contains) &&
+        (expected.summaryContains === undefined || result.summary.includes(expected.summaryContains)) &&
         result.ms <= maxMs;
 
     if (!ok) {
@@ -45,7 +59,10 @@ function check(name, payload, expected, options = {}) {
         (ok ? 'PASS  ' : 'FAIL  ') + name +
         '  [exit=' + result.code + ' ' + result.ms.toFixed(0) + 'ms]' +
         (ok ? '' : '\n      expected exit=' + expected.code + ' containing ' +
-            JSON.stringify(expected.contains) + ', got: ' + JSON.stringify(result.out.slice(0, 200)))
+            JSON.stringify(expected.contains) + ', got: ' + JSON.stringify(result.out.slice(0, 200))) +
+        (ok || expected.summaryContains === undefined ? '' :
+            '\n      expected summary containing ' + JSON.stringify(expected.summaryContains) +
+            ', got: ' + JSON.stringify(result.summary.slice(0, 200)))
     );
 }
 
@@ -162,6 +179,39 @@ check('empty-block annotation carries a title',
 check('event-guard annotation carries a title',
     { push: {} },
     { code: 1, contains: '::error title=Release notes check could not run::' });
+
+// Job summary. The runner renders $GITHUB_STEP_SUMMARY on the run page, which
+// is where "Details" on the PR leads.
+check('failure writes a summary with the reason and an example',
+    pr('```release-note\nTBD\n```'),
+    {
+        code: 1,
+        contains: 'still a placeholder',
+        summaryContains: '## Release notes: failed',
+    });
+check('failure summary shows a copyable example',
+    pr('Just a description'),
+    { code: 1, contains: 'No release notes found', summaryContains: '````\n```release-note' });
+check('pass writes a summary',
+    pr('```release-note\nReal note\n```'),
+    { code: 0, contains: 'No errors detected', summaryContains: '## Release notes: passed' });
+check('skipped label summary names the label',
+    { pull_request: { labels: [{ name: 'other' }], body: '' } },
+    {
+        code: 0,
+        contains: 'not present, skipping',
+        summaryContains: 'The `release-note-required` label is not present',
+    });
+check('draft summary says the check is not enforced',
+    pr('```release-note\nTBD\n```', { draft: true }),
+    { code: 0, contains: '[draft]', summaryContains: '## Release notes: not enforced (draft)' });
+check('event-guard writes a summary',
+    { push: {} },
+    {
+        code: 1,
+        contains: 'requires a pull_request event',
+        summaryContains: '## Release notes: could not run',
+    });
 
 fs.rmSync(tmp, { recursive: true, force: true });
 

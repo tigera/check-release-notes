@@ -49,12 +49,12 @@ module.exports = require("fs");
 var __webpack_exports__ = {};
 const fs = __nccwpck_require__(896);
 
-// This action deliberately has no runtime dependencies. It only needed two
+// This action deliberately has no runtime dependencies. It only needed a few
 // helpers from @actions/core, and that package pulls in an HTTP client
 // (@actions/http-client -> undici) that this action never calls: roughly 1MB
 // of unreachable network code, carrying its own advisories, bundled into every
-// run against a private PR. The two helpers are reimplemented below against
-// the documented runner contract.
+// run against a private PR. The helpers are reimplemented below against the
+// documented runner contract.
 
 // Inputs arrive as INPUT_<NAME>, upper-cased with spaces turned into
 // underscores. Hyphens are left alone, so 'label-name' is INPUT_LABEL-NAME.
@@ -90,8 +90,38 @@ function setFailed(message, title) {
     process.exitCode = 1;
 }
 
+// Markdown appended to $GITHUB_STEP_SUMMARY is rendered on the run's summary
+// page, one click behind the "Details" link on the PR. It is the only place
+// this action can put more than a single line of text, so the failure cases
+// spend that room on an example the author can copy.
+function writeSummary(markdown) {
+    const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+    if (!summaryPath) {
+        // Older runners, and act, do not provide the file.
+        return;
+    }
+    try {
+        fs.appendFileSync(summaryPath, markdown + '\n');
+    } catch (error) {
+        // The summary is a nicety. Failing to write one must not change the
+        // verdict the check reports.
+        console.log('Could not write the job summary: ' + error.message);
+    }
+}
+
 const FENCE_START = '```release-note';
 const FENCE_END = '```';
+
+// Four backticks so the three-backtick fence inside renders literally.
+const EXAMPLE = [
+    'Add a block like this to the pull request description:',
+    '',
+    '````',
+    FENCE_START,
+    'Fixed a panic when the config file was empty.',
+    FENCE_END,
+    '````',
+].join('\n');
 const COMMENT_START = '<!--';
 const COMMENT_END = '-->';
 
@@ -248,9 +278,11 @@ try {
     const labelNames = (pullRequest.labels || []).map(item => item.name);
 
     let failure = null;
+    let passedDetail = 'The `' + labelName + '` label is not present, so no release note is required.';
 
     if (labelNames.includes(labelName)) {
         failure = validate(findReleaseNoteBlocks(pullRequest.body), labelName);
+        passedDetail = 'A release note was found in the pull request description.';
     } else {
         console.log('Label ' + labelName + ' not present, skipping validation');
     }
@@ -258,15 +290,23 @@ try {
     if (failure) {
         if (pullRequest.draft === true) {
             console.log('[draft] PR contained the following issue: ' + failure.message);
+            writeSummary('## Release notes: not enforced (draft)\n\n' +
+                '**' + failure.title + '**\n\n' + failure.message + '\n\n' +
+                'This pull request is a draft, so the check is not failing. ' +
+                'It will fail once the pull request is ready for review.\n\n' + EXAMPLE);
         } else {
             setFailed(failure.message, failure.title);
+            writeSummary('## Release notes: failed\n\n' +
+                '**' + failure.title + '**\n\n' + failure.message + '\n\n' + EXAMPLE);
         }
     } else {
         console.log('No errors detected in release notes.');
+        writeSummary('## Release notes: passed\n\n' + passedDetail);
     }
 
 } catch (error) {
     setFailed(error.message, 'Release notes check could not run');
+    writeSummary('## Release notes: could not run\n\n' + error.message);
 }
 
 module.exports = __webpack_exports__;
