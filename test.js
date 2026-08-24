@@ -56,6 +56,7 @@ const pr = (body, extra = {}) => ({
 const PASSED = { code: 0, contains: 'No errors detected' };
 const MISSING = { code: 1, contains: 'No release notes found' };
 const PLACEHOLDER = { code: 1, contains: 'still a placeholder' };
+const NEGATION = { code: 1, contains: 'not a release note' };
 
 // Label gating.
 check('label absent skips validation',
@@ -65,17 +66,48 @@ check('missing labels key does not crash',
     { pull_request: { body: '', labels: undefined } },
     { code: 0, contains: 'not present, skipping' });
 
-// Accepted bodies.
+// Only an actual release note is accepted.
 check('real notes pass', pr('```release-note\nFixed a real bug\n```'), PASSED);
-check('NONE is still accepted', pr('```release-note\nNONE\n```'), PASSED);
+check('multi-line notes pass',
+    pr('```release-note\nFixed a real bug.\n\nAlso fixed a second one.\n```'), PASSED);
 
 // Placeholders and empty blocks.
 check('TBD fails', pr('```release-note\nTBD\n```'), PLACEHOLDER);
 check('"TBD." fails', pr('```release-note\nTBD.\n```'), PLACEHOLDER);
 check('lowercase "tbd:" fails', pr('```release-note\ntbd:\n```'), PLACEHOLDER);
-check('N/A fails', pr('```release-note\nN/A\n```'), PLACEHOLDER);
 check('TODO fails', pr('```release-note\nTODO\n```'), PLACEHOLDER);
+check('WIP fails', pr('```release-note\nWIP\n```'), PLACEHOLDER);
 check('empty block fails', pr('```release-note\n\n```'), { code: 1, contains: 'are empty' });
+
+// Saying "no note needed" is a statement about the label, not a release note.
+check('NONE fails', pr('```release-note\nNONE\n```'), NEGATION);
+check('lowercase "none." fails', pr('```release-note\nnone.\n```'), NEGATION);
+check('"- none -" fails', pr('```release-note\n- none -\n```'), NEGATION);
+check('N/A fails', pr('```release-note\nN/A\n```'), NEGATION);
+check('NA fails', pr('```release-note\nNA\n```'), NEGATION);
+check('NIL fails', pr('```release-note\nnil\n```'), NEGATION);
+check('"No release note needed" fails',
+    pr('```release-note\nNo release note needed\n```'), NEGATION);
+check('"not required" fails', pr('```release-note\nNot required.\n```'), NEGATION);
+check('negation message names the label',
+    pr('```release-note\nNONE\n```'),
+    { code: 1, contains: 'remove the release-note-required label' });
+check('negation message names a custom label',
+    { pull_request: { labels: [{ name: 'needs-note' }], body: '```release-note\nNONE\n```', draft: false } },
+    { code: 1, contains: 'remove the needs-note label' }, { label: 'needs-note' });
+
+// Matching is on the whole entry, so a real note that merely starts with a
+// negative word must still pass.
+check('"None of the defaults change" passes',
+    pr('```release-note\nNone of the defaults change when upgrading.\n```'), PASSED);
+check('"No longer panics" passes',
+    pr('```release-note\nNo longer panics on an empty config.\n```'), PASSED);
+check('"NA" inside a real note passes',
+    pr('```release-note\nAdded NA region support.\n```'), PASSED);
+
+// A real note anywhere in the body wins over a stale non-note block.
+check('NONE above real notes passes',
+    pr('```release-note\nNONE\n```\n\n```release-note\nReal note\n```'), PASSED);
 check('no block fails', pr('Just a description'), MISSING);
 check('null body fails', pr(null), MISSING);
 check('unclosed fence fails', pr('```release-note\nnotes but no closing fence'), MISSING);

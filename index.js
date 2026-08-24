@@ -33,8 +33,21 @@ const FENCE_END = '```';
 const COMMENT_START = '<!--';
 const COMMENT_END = '-->';
 
-// Values that mean "the author has not written the notes yet".
-const PLACEHOLDERS = ['TBD', 'TODO', 'FIXME', 'XXX', 'N/A', 'NA'];
+// The only valid entry is an actual release note. Two kinds of non-note get
+// their own message so the author knows what to do about it.
+
+// The author has not written the note yet.
+const PLACEHOLDERS = ['TBD', 'TODO', 'FIXME', 'XXX', 'WIP', 'PENDING'];
+
+// The author is saying no release note is needed. That is a statement about
+// the label, not a release note, so it fails and points at the label instead.
+const NEGATIONS = [
+    'NONE', 'N/A', 'NA', 'NIL', 'NO', 'NOPE', 'NOTHING',
+    'NOT APPLICABLE', 'NOT NEEDED', 'NOT REQUIRED',
+    'NO RELEASE NOTE', 'NO RELEASE NOTES',
+    'NO RELEASE NOTE NEEDED', 'NO RELEASE NOTES NEEDED',
+    'NO RELEASE NOTE REQUIRED', 'NO RELEASE NOTES REQUIRED',
+];
 
 // Remove HTML comments so that a commented-out block from the PR template is
 // never mistaken for real release notes. Uses indexOf rather than a regex so
@@ -90,25 +103,55 @@ function findReleaseNoteBlocks(body) {
     }
 }
 
-function isPlaceholder(notes) {
-    // Ignore surrounding punctuation so that "TBD." and "TBD:" are caught too.
-    const normalised = notes.toUpperCase().replace(/^\W+|\W+$/g, '');
-    return PLACEHOLDERS.includes(normalised);
+// Collapse whitespace and strip surrounding punctuation so that "TBD.",
+// "- none -" and "No release note needed!" all reduce to a comparable form.
+// The comparison is against the whole entry, never a substring, so a real note
+// that happens to start with "None of ..." is untouched.
+function normalise(notes) {
+    return notes
+        .toUpperCase()
+        .replace(/\s+/g, ' ')
+        .replace(/^\W+|\W+$/g, '')
+        .trim();
 }
 
-// A block counts as valid if it holds anything other than a placeholder. A PR
-// that leaves a stale "TBD" above its real notes still passes.
-function validate(blocks) {
+function classify(notes) {
+    const normalised = normalise(notes);
+    if (normalised === '') {
+        return 'empty';
+    }
+    if (PLACEHOLDERS.includes(normalised)) {
+        return 'placeholder';
+    }
+    if (NEGATIONS.includes(normalised)) {
+        return 'negation';
+    }
+    return 'note';
+}
+
+// A block counts as valid only if it holds a real note, so a PR that leaves a
+// stale "TBD" above its actual notes still passes. When nothing is valid, the
+// message describes the first block, which is the one the author most likely
+// meant to fill in.
+function validate(blocks, labelName) {
     if (blocks.length === 0) {
         return 'No release notes found in PR body';
     }
-    if (blocks.some(notes => notes !== '' && !isPlaceholder(notes))) {
+
+    const kinds = blocks.map(classify);
+    if (kinds.includes('note')) {
         return '';
     }
-    if (blocks.every(notes => notes === '')) {
-        return 'Release notes are empty';
+
+    switch (kinds[0]) {
+        case 'placeholder':
+            return 'Release notes are still a placeholder. Replace it with an actual release note.';
+        case 'negation':
+            return 'Release notes say no note is needed, which is not a release note. ' +
+                'Write an actual release note, or remove the ' + labelName + ' label from this PR.';
+        default:
+            return 'Release notes are empty';
     }
-    return 'Release notes are still a placeholder (' + PLACEHOLDERS.join(', ') + ')';
 }
 
 function readPullRequest() {
@@ -132,7 +175,7 @@ try {
     let failureMessage = '';
 
     if (labelNames.includes(labelName)) {
-        failureMessage = validate(findReleaseNoteBlocks(pullRequest.body));
+        failureMessage = validate(findReleaseNoteBlocks(pullRequest.body), labelName);
     } else {
         console.log('Label ' + labelName + ' not present, skipping validation');
     }
