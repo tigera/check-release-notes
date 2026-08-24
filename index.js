@@ -1,46 +1,152 @@
-const core = require('@actions/core');
-const github = require('@actions/github');
+const fs = require('fs');
 
-const re = new RegExp(/(?<=```release-note\s*)(.*?)(?=\s*```)/, 's');
+// This action deliberately has no runtime dependencies. It only needed two
+// helpers from @actions/core, and that package pulls in an HTTP client
+// (@actions/http-client -> undici) that this action never calls: roughly 1MB
+// of unreachable network code, carrying its own advisories, bundled into every
+// run against a private PR. The two helpers are reimplemented below against
+// the documented runner contract.
 
-try {
-    const labelName = core.getInput('label-name');
-    const context = github.context;
+// Inputs arrive as INPUT_<NAME>, upper-cased with spaces turned into
+// underscores. Hyphens are left alone, so 'label-name' is INPUT_LABEL-NAME.
+function getInput(name) {
+    const value = process.env['INPUT_' + name.replace(/ /g, '_').toUpperCase()] || '';
+    return value.trim();
+}
 
-    const labels = context.payload.pull_request.labels;
-    const prBody = context.payload.pull_request.body;
+// Workflow commands are newline-delimited, so any literal '%', CR or LF in the
+// message has to be percent-encoded or it would terminate the command early.
+function escapeCommandData(value) {
+    return String(value)
+        .replace(/%/g, '%25')
+        .replace(/\r/g, '%0D')
+        .replace(/\n/g, '%0A');
+}
 
-    const labels_names = labels.map(item => item.name)
+function setFailed(message) {
+    process.stdout.write('::error::' + escapeCommandData(message) + '\n');
+    process.exitCode = 1;
+}
 
-    var failureMessage = ""
+const FENCE_START = '```release-note';
+const FENCE_END = '```';
+const COMMENT_START = '<!--';
+const COMMENT_END = '-->';
 
-    if (labels_names.includes(labelName)) {
-        var match = re.exec(prBody);
-        if (match == null) {
-            failureMessage = "No release notes found in PR body"
-        } else {
-            var releaseNotes = match[0].trim();
-            if (releaseNotes.toUpperCase() == "TBD") {
-                failureMessage = "Release notes are still TBD"
-            }
-            if (releaseNotes == "") {
-                failureMessage = "Release notes are empty"
-            }
+// Values that mean "the author has not written the notes yet".
+const PLACEHOLDERS = ['TBD', 'TODO', 'FIXME', 'XXX', 'N/A', 'NA'];
+
+// Remove HTML comments so that a commented-out block from the PR template is
+// never mistaken for real release notes. Uses indexOf rather than a regex so
+// the cost stays linear in the length of the body.
+function stripHtmlComments(body) {
+    let out = '';
+    let pos = 0;
+
+    for (;;) {
+        const start = body.indexOf(COMMENT_START, pos);
+        if (start === -1) {
+            return out + body.slice(pos);
         }
-    } else {
-        console.log("Label " + labelName + " not present, skipping validation")
+        out += body.slice(pos, start);
+
+        const end = body.indexOf(COMMENT_END, start + COMMENT_START.length);
+        if (end === -1) {
+            // An unterminated comment swallows the rest of the body, which is
+            // how GitHub renders it too.
+            return out;
+        }
+        pos = end + COMMENT_END.length;
+    }
+}
+
+// Collect the contents of every ```release-note block in the body. indexOf
+// keeps this linear; the previous lookbehind/lookahead regex backtracked
+// cubically on an unclosed fence followed by whitespace.
+function findReleaseNoteBlocks(body) {
+    if (typeof body !== 'string') {
+        return [];
     }
 
-    if (failureMessage != "") {
-        if (context.payload.pull_request.draft == true) {
-            console.log("[draft] PR contained the following issue: " + failureMessage)
+    const text = stripHtmlComments(body);
+    const blocks = [];
+    let pos = 0;
+
+    for (;;) {
+        const start = text.indexOf(FENCE_START, pos);
+        if (start === -1) {
+            return blocks;
+        }
+
+        const contentStart = start + FENCE_START.length;
+        const end = text.indexOf(FENCE_END, contentStart);
+        if (end === -1) {
+            // Unclosed fence, so there is no complete block to read.
+            return blocks;
+        }
+
+        blocks.push(text.slice(contentStart, end).trim());
+        pos = end + FENCE_END.length;
+    }
+}
+
+function isPlaceholder(notes) {
+    // Ignore surrounding punctuation so that "TBD." and "TBD:" are caught too.
+    const normalised = notes.toUpperCase().replace(/^\W+|\W+$/g, '');
+    return PLACEHOLDERS.includes(normalised);
+}
+
+// A block counts as valid if it holds anything other than a placeholder. A PR
+// that leaves a stale "TBD" above its real notes still passes.
+function validate(blocks) {
+    if (blocks.length === 0) {
+        return 'No release notes found in PR body';
+    }
+    if (blocks.some(notes => notes !== '' && !isPlaceholder(notes))) {
+        return '';
+    }
+    if (blocks.every(notes => notes === '')) {
+        return 'Release notes are empty';
+    }
+    return 'Release notes are still a placeholder (' + PLACEHOLDERS.join(', ') + ')';
+}
+
+function readPullRequest() {
+    const eventPath = process.env.GITHUB_EVENT_PATH;
+    if (!eventPath) {
+        throw new Error('GITHUB_EVENT_PATH is not set; this action must run in GitHub Actions');
+    }
+
+    const payload = JSON.parse(fs.readFileSync(eventPath, 'utf8'));
+    if (!payload.pull_request) {
+        throw new Error('No pull_request in the event payload; this action requires a pull_request event');
+    }
+    return payload.pull_request;
+}
+
+try {
+    const labelName = getInput('label-name');
+    const pullRequest = readPullRequest();
+    const labelNames = (pullRequest.labels || []).map(item => item.name);
+
+    let failureMessage = '';
+
+    if (labelNames.includes(labelName)) {
+        failureMessage = validate(findReleaseNoteBlocks(pullRequest.body));
+    } else {
+        console.log('Label ' + labelName + ' not present, skipping validation');
+    }
+
+    if (failureMessage !== '') {
+        if (pullRequest.draft === true) {
+            console.log('[draft] PR contained the following issue: ' + failureMessage);
         } else {
-            core.setFailed("An error was found: " + failureMessage)
+            setFailed('An error was found: ' + failureMessage);
         }
     } else {
-        console.log("No errors detected in release notes.")
+        console.log('No errors detected in release notes.');
     }
 
 } catch (error) {
-    core.setFailed(error.message);
+    setFailed(error.message);
 }

@@ -1,15 +1,25 @@
 
-.PHONY: build lint
+.PHONY: build lint test
 
-build: lint dist/index.js 
+# Always use the pinned binaries from node_modules. Resolving these through
+# npx or $PATH can pick up a different globally installed version, which
+# changes the bytes of dist/index.js and makes the bundle look tampered with.
+ESLINT := ./node_modules/.bin/eslint
+NCC := ./node_modules/.bin/ncc
+
+build: lint dist/index.js
 
 lint: node_modules
 	$(info Running eslint...)
-	@npx eslint index.js
+	@$(ESLINT) index.js test.js
 
-node_modules:
-	$(info Running `npm install`)
-	@npm install
+test: build
+	$(info Running tests...)
+	@node test.js
+
+node_modules: package-lock.json
+	$(info Running `npm ci`)
+	@npm ci
 
 dist/index.js: node_modules index.js
-	@ncc build index.js --license license.txt
+	@$(NCC) build index.js

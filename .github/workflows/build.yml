@@ -1,0 +1,46 @@
+name: Build
+
+# dist/index.js is the file that actually executes when a consumer runs this
+# action, and it is a bundle nobody reviews by hand. This job proves that the
+# committed bundle is exactly what index.js compiles to, so a drifted or
+# tampered dist cannot pass review unnoticed.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: make lint
+
+      - name: Rebuild the bundle
+        run: ./node_modules/.bin/ncc build index.js
+
+      - name: Check dist/ matches index.js
+        run: |
+          if ! git diff --exit-code -- dist/; then
+            echo "::error::dist/ is out of date. Run 'make build' and commit the result."
+            exit 1
+          fi
+
+      - name: Test
+        run: node test.js
+
+      - name: Audit runtime dependencies
+        run: npm audit --omit=dev --audit-level=high
