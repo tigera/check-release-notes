@@ -2,7 +2,7 @@
 // GITHUB_EVENT_PATH pointing at an event payload and the input passed as
 // INPUT_LABEL-NAME. Testing the bundle rather than the source means these
 // cases also prove the committed dist behaves correctly.
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -14,21 +14,31 @@ const summaryPath = path.join(tmp, 'summary.md');
 
 let failures = 0;
 
-function run(payload, { label = 'release-note-required' } = {}) {
+function run(payload, { label = 'release-note-required', env = {} } = {}) {
     fs.writeFileSync(eventPath, JSON.stringify(payload));
     // The runner hands each step an empty file and reads it back afterwards.
     fs.writeFileSync(summaryPath, '');
     const start = process.hrtime.bigint();
     let code = 0;
     let out = '';
+
+    // A GITHUB_TOKEN inherited from the developer's shell would send these
+    // runs at the real API, so the check-run credentials are always explicit.
+    const childEnv = {
+        ...process.env,
+        GITHUB_EVENT_PATH: eventPath,
+        GITHUB_STEP_SUMMARY: summaryPath,
+        'INPUT_LABEL-NAME': label,
+    };
+    delete childEnv.GITHUB_TOKEN;
+    delete childEnv['INPUT_GITHUB-TOKEN'];
+    delete childEnv.GITHUB_API_URL;
+    delete childEnv.GITHUB_REPOSITORY;
+    Object.assign(childEnv, env);
+
     try {
         out = execFileSync('node', [TARGET], {
-            env: {
-                ...process.env,
-                GITHUB_EVENT_PATH: eventPath,
-                GITHUB_STEP_SUMMARY: summaryPath,
-                'INPUT_LABEL-NAME': label,
-            },
+            env: childEnv,
             encoding: 'utf8',
             timeout: 60000,
         });
@@ -66,8 +76,16 @@ function check(name, payload, expected, options = {}) {
     );
 }
 
+const HEAD_SHA = '0d5eb4f1a2c3b4d5e6f708192a3b4c5d6e7f8091';
+
 const pr = (body, extra = {}) => ({
-    pull_request: { labels: [{ name: 'release-note-required' }], body, draft: false, ...extra },
+    pull_request: {
+        labels: [{ name: 'release-note-required' }],
+        body,
+        draft: false,
+        head: { sha: HEAD_SHA },
+        ...extra,
+    },
 });
 
 const PASSED = { code: 0, contains: 'No errors detected' };
@@ -212,6 +230,145 @@ check('event-guard writes a summary',
         contains: 'requires a pull_request event',
         summaryContains: '## Release notes: could not run',
     });
+
+// Check run. The stub API has to be its own process: execFileSync blocks this
+// one's event loop, so a server listening here would never answer the child.
+const STUB = path.join(tmp, 'stub-api.js');
+fs.writeFileSync(STUB, [
+    "const fs = require('fs');",
+    "const http = require('http');",
+    'const [status, requestLog, portFile] = process.argv.slice(2);',
+    'const server = http.createServer((req, res) => {',
+    "    let body = '';",
+    "    req.on('data', chunk => { body += chunk; });",
+    "    req.on('end', () => {",
+    '        fs.appendFileSync(requestLog, JSON.stringify({',
+    '            method: req.method,',
+    '            url: req.url,',
+    '            authorization: req.headers.authorization,',
+    '            body,',
+    "        }) + '\\n');",
+    "        res.writeHead(Number(status), { 'content-type': 'application/json' });",
+    "        res.end('{}');",
+    '    });',
+    '});',
+    "server.listen(0, '127.0.0.1', () => {",
+    '    fs.writeFileSync(portFile, String(server.address().port));',
+    '});',
+].join('\n'));
+
+// Sleeping without the event loop, which execFileSync has already blocked.
+function sleepMs(ms) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function startStub(status) {
+    const portFile = path.join(tmp, 'port-' + status);
+    const requestLog = path.join(tmp, 'requests-' + status + '.jsonl');
+    fs.rmSync(portFile, { force: true });
+    fs.writeFileSync(requestLog, '');
+
+    const child = spawn('node', [STUB, String(status), requestLog, portFile], { stdio: 'ignore' });
+
+    for (let waited = 0; waited < 10000; waited += 50) {
+        if (fs.existsSync(portFile)) {
+            return {
+                url: 'http://127.0.0.1:' + fs.readFileSync(portFile, 'utf8').trim(),
+                requests: () => fs.readFileSync(requestLog, 'utf8').trim().split('\n')
+                    .filter(Boolean).map(line => JSON.parse(line)),
+                stop: () => child.kill(),
+            };
+        }
+        sleepMs(50);
+    }
+    child.kill();
+    throw new Error('stub API did not start');
+}
+
+const REPO_ENV = { GITHUB_REPOSITORY: 'tigera/check-release-notes' };
+
+// Without a token the action must say so and otherwise behave exactly as before.
+check('no token skips the check run without changing the verdict',
+    pr('```release-note\nTBD\n```'),
+    { code: 1, contains: 'Skipped the "Release notes" check run: no github-token' });
+check('no token still passes a good PR',
+    pr('```release-note\nReal note\n```'),
+    { code: 0, contains: 'no github-token' });
+
+const accepting = startStub(201);
+check('failure posts a check run and keeps failing',
+    pr('```release-note\nNONE\n```'),
+    { code: 1, contains: 'Reported "Release notes say no note is needed"' },
+    { env: { ...REPO_ENV, GITHUB_API_URL: accepting.url, GITHUB_TOKEN: 'stub-token' } });
+
+const posted = accepting.requests();
+const body = posted.length ? JSON.parse(posted[posted.length - 1].body) : {};
+function expect(name, actual, wanted) {
+    const ok = JSON.stringify(actual) === JSON.stringify(wanted);
+    if (!ok) {
+        failures++;
+    }
+    console.log((ok ? 'PASS  ' : 'FAIL  ') + name +
+        (ok ? '' : '\n      expected ' + JSON.stringify(wanted) + ', got ' + JSON.stringify(actual)));
+}
+expect('check run is POSTed to the check-runs endpoint',
+    posted.length && posted[posted.length - 1].method + ' ' + posted[posted.length - 1].url,
+    'POST /repos/tigera/check-release-notes/check-runs');
+expect('check run authenticates with the supplied token',
+    posted.length && posted[posted.length - 1].authorization, 'Bearer stub-token');
+expect('check run is anchored to the head SHA', body.head_sha, HEAD_SHA);
+expect('check run concludes as a failure', body.conclusion, 'failure');
+expect('check run title carries the reason to the PR page',
+    body.output && body.output.title, 'Release notes say no note is needed');
+
+check('a passing PR concludes as a success',
+    pr('```release-note\nReal note\n```'),
+    { code: 0, contains: 'Reported "Release note found"' },
+    { env: { ...REPO_ENV, GITHUB_API_URL: accepting.url, GITHUB_TOKEN: 'stub-token' } });
+expect('passing check run concludes as a success',
+    JSON.parse(accepting.requests().pop().body).conclusion, 'success');
+
+check('a draft concludes as neutral rather than failing',
+    pr('```release-note\nTBD\n```', { draft: true }),
+    { code: 0, contains: 'Reported "Not enforced while this pull request is a draft"' },
+    { env: { ...REPO_ENV, GITHUB_API_URL: accepting.url, GITHUB_TOKEN: 'stub-token' } });
+expect('draft check run concludes as neutral',
+    JSON.parse(accepting.requests().pop().body).conclusion, 'neutral');
+accepting.stop();
+
+// A read-only token, which is what a pull_request event from a fork gets.
+const forbidding = startStub(403);
+check('a read-only token degrades to a log line',
+    pr('```release-note\nTBD\n```'),
+    { code: 1, contains: 'GitHub answered HTTP 403' },
+    { env: { ...REPO_ENV, GITHUB_API_URL: forbidding.url, GITHUB_TOKEN: 'read-only-token' } });
+check('a read-only token does not turn a passing PR into a failure',
+    pr('```release-note\nReal note\n```'),
+    { code: 0, contains: 'The result reported above is unaffected' },
+    { env: { ...REPO_ENV, GITHUB_API_URL: forbidding.url, GITHUB_TOKEN: 'read-only-token' } });
+forbidding.stop();
+
+const missing = startStub(404);
+check('a token without checks: write degrades to a log line',
+    pr('```release-note\nTBD\n```'),
+    { code: 1, contains: 'missing checks: write' },
+    { env: { ...REPO_ENV, GITHUB_API_URL: missing.url, GITHUB_TOKEN: 'weak-token' } });
+missing.stop();
+
+// Nothing is listening on port 1, so this exercises the network-failure path.
+check('an unreachable API degrades to a log line',
+    pr('```release-note\nTBD\n```'),
+    { code: 1, contains: 'the request to GitHub failed' },
+    { env: { ...REPO_ENV, GITHUB_API_URL: 'http://127.0.0.1:1', GITHUB_TOKEN: 'stub-token' } });
+
+check('a payload with no head SHA skips the check run',
+    { pull_request: { labels: [{ name: 'release-note-required' }], body: '', draft: false } },
+    { code: 1, contains: 'the event payload has no head SHA' },
+    { env: { ...REPO_ENV, GITHUB_TOKEN: 'stub-token' } });
+check('a missing GITHUB_REPOSITORY skips the check run',
+    pr('```release-note\nTBD\n```'),
+    { code: 1, contains: 'GITHUB_REPOSITORY is not set' },
+    { env: { GITHUB_TOKEN: 'stub-token' } });
 
 fs.rmSync(tmp, { recursive: true, force: true });
 

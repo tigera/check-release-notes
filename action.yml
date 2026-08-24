@@ -5,6 +5,13 @@ inputs:
     description: 'The Github label that we want to check for'
     required: true
     default: 'release-note-required'
+  github-token:
+    description: >
+      Token used to publish a separate "Release notes" check run, whose title
+      shows the reason on the pull request page. Needs checks: write. Optional:
+      without it, or with the read-only token a fork PR gets, the action logs
+      that it skipped the check run and reports the same verdict as before.
+    required: false
 runs:
   using: 'node24'
   main: 'dist/index.js'

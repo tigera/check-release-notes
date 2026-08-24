@@ -259,6 +259,94 @@ function validate(blocks, labelName) {
     }
 }
 
+// The runner owns the "Failing after 3s" line under the workflow's own check
+// run, and nothing the action prints can change it. A check run this action
+// creates itself does have a line the action controls: its output title. That
+// is what puts the reason on the PR page without anyone opening Details.
+//
+// This is strictly an extra. Creating it needs a token with checks: write,
+// which is not available on a pull_request event from a fork, so every failure
+// here is logged and stepped over. The verdict comes from the validation
+// above, never from whether GitHub accepted this call.
+const CHECK_NAME = 'Release notes';
+const CHECK_RUN_TIMEOUT_MS = 10000;
+
+function skipReason(status) {
+    switch (status) {
+        case 401:
+            return 'The token is invalid or has expired.';
+        case 403:
+            return 'The token is read-only, which is what a pull_request event from a fork ' +
+                'gets. Use pull_request_target if the check run is needed on fork PRs.';
+        case 404:
+            return 'The token is missing checks: write, or cannot see this repository.';
+        case 422:
+            return 'GitHub rejected the check run; the head SHA may not belong to this repository.';
+        default:
+            return '';
+    }
+}
+
+function skipped(detail) {
+    console.log('Skipped the "' + CHECK_NAME + '" check run: ' + detail +
+        ' The result reported above is unaffected.');
+}
+
+async function createCheckRun(report, headSha) {
+    const token = getInput('github-token') || process.env.GITHUB_TOKEN || '';
+    if (!token) {
+        skipped('no github-token was supplied. Pass one and grant checks: write ' +
+            'to show the reason on the pull request page itself.');
+        return;
+    }
+    if (!process.env.GITHUB_REPOSITORY) {
+        skipped('GITHUB_REPOSITORY is not set.');
+        return;
+    }
+    if (!headSha) {
+        skipped('the event payload has no head SHA.');
+        return;
+    }
+
+    const url = (process.env.GITHUB_API_URL || 'https://api.github.com') +
+        '/repos/' + process.env.GITHUB_REPOSITORY + '/check-runs';
+
+    let response;
+    try {
+        response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'authorization': 'Bearer ' + token,
+                'accept': 'application/vnd.github+json',
+                'x-github-api-version': '2022-11-28',
+                'content-type': 'application/json',
+                'user-agent': 'check-release-notes',
+            },
+            body: JSON.stringify({
+                name: CHECK_NAME,
+                head_sha: headSha,
+                status: 'completed',
+                conclusion: report.conclusion,
+                // The title is the line GitHub shows beside the check name on
+                // the pull request page.
+                output: { title: report.title, summary: report.summary },
+            }),
+            signal: AbortSignal.timeout(CHECK_RUN_TIMEOUT_MS),
+        });
+    } catch (error) {
+        // Offline runner, blocked egress, DNS failure, or the timeout above.
+        skipped('the request to GitHub failed (' + error.message + ').');
+        return;
+    }
+
+    if (!response.ok) {
+        skipped('GitHub answered HTTP ' + response.status + '. ' + skipReason(response.status));
+        return;
+    }
+
+    console.log('Reported "' + report.title + '" on the "' + CHECK_NAME + '" check run.');
+}
+
 function readPullRequest() {
     const eventPath = process.env.GITHUB_EVENT_PATH;
     if (!eventPath) {
@@ -272,42 +360,79 @@ function readPullRequest() {
     return payload.pull_request;
 }
 
-try {
-    const labelName = getInput('label-name');
-    const pullRequest = readPullRequest();
+// One report drives all three outputs: the annotation, the job summary, and
+// the check run. They stay in step because they are built from the same object.
+function report(pullRequest, labelName) {
     const labelNames = (pullRequest.labels || []).map(item => item.name);
 
-    let failure = null;
-    let passedDetail = 'The `' + labelName + '` label is not present, so no release note is required.';
-
-    if (labelNames.includes(labelName)) {
-        failure = validate(findReleaseNoteBlocks(pullRequest.body), labelName);
-        passedDetail = 'A release note was found in the pull request description.';
-    } else {
+    if (!labelNames.includes(labelName)) {
         console.log('Label ' + labelName + ' not present, skipping validation');
+        return {
+            conclusion: 'success',
+            title: 'No release note required',
+            summary: '## Release notes: passed\n\nThe `' + labelName +
+                '` label is not present, so no release note is required.',
+        };
     }
 
-    if (failure) {
-        if (pullRequest.draft === true) {
-            console.log('[draft] PR contained the following issue: ' + failure.message);
-            writeSummary('## Release notes: not enforced (draft)\n\n' +
+    const failure = validate(findReleaseNoteBlocks(pullRequest.body), labelName);
+
+    if (!failure) {
+        console.log('No errors detected in release notes.');
+        return {
+            conclusion: 'success',
+            title: 'Release note found',
+            summary: '## Release notes: passed\n\n' +
+                'A release note was found in the pull request description.',
+        };
+    }
+
+    // A draft is still being written, so it is reported but not enforced.
+    if (pullRequest.draft === true) {
+        console.log('[draft] PR contained the following issue: ' + failure.message);
+        return {
+            conclusion: 'neutral',
+            title: 'Not enforced while this pull request is a draft',
+            summary: '## Release notes: not enforced (draft)\n\n' +
                 '**' + failure.title + '**\n\n' + failure.message + '\n\n' +
                 'This pull request is a draft, so the check is not failing. ' +
-                'It will fail once the pull request is ready for review.\n\n' + EXAMPLE);
-        } else {
-            setFailed(failure.message, failure.title);
-            writeSummary('## Release notes: failed\n\n' +
-                '**' + failure.title + '**\n\n' + failure.message + '\n\n' + EXAMPLE);
-        }
-    } else {
-        console.log('No errors detected in release notes.');
-        writeSummary('## Release notes: passed\n\n' + passedDetail);
+                'It will fail once the pull request is ready for review.\n\n' + EXAMPLE,
+        };
     }
 
-} catch (error) {
-    setFailed(error.message, 'Release notes check could not run');
-    writeSummary('## Release notes: could not run\n\n' + error.message);
+    setFailed(failure.message, failure.title);
+    return {
+        conclusion: 'failure',
+        title: failure.title,
+        summary: '## Release notes: failed\n\n' +
+            '**' + failure.title + '**\n\n' + failure.message + '\n\n' + EXAMPLE,
+    };
 }
+
+async function main() {
+    let pullRequest = null;
+    let result;
+
+    try {
+        const labelName = getInput('label-name');
+        pullRequest = readPullRequest();
+        result = report(pullRequest, labelName);
+    } catch (error) {
+        setFailed(error.message, 'Release notes check could not run');
+        result = {
+            conclusion: 'failure',
+            title: 'Release notes check could not run',
+            summary: '## Release notes: could not run\n\n' + error.message,
+        };
+    }
+
+    writeSummary(result.summary);
+    await createCheckRun(result, pullRequest && pullRequest.head && pullRequest.head.sha);
+}
+
+// Nothing in main() is expected to reject, but an unhandled rejection would
+// end the process without an annotation explaining why.
+main().catch(error => setFailed(error.message, 'Release notes check could not run'));
 
 module.exports = __webpack_exports__;
 /******/ })()
