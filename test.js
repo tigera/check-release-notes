@@ -144,6 +144,25 @@ check('large body with valid notes',
 check('non-pull_request event reports clearly',
     { push: {} }, { code: 1, contains: 'requires a pull_request event' });
 
+// Annotation titles. These head the message in the Checks tab, and ':' and ','
+// inside a property value have to arrive percent-encoded or the runner reads
+// the command as truncated.
+check('missing notes annotation carries a title',
+    pr('Just a description'),
+    { code: 1, contains: '::error title=No release notes::' });
+check('placeholder annotation carries a title',
+    pr('```release-note\nTBD\n```'),
+    { code: 1, contains: '::error title=Release notes are still a placeholder::' });
+check('negation annotation carries a title',
+    pr('```release-note\nNONE\n```'),
+    { code: 1, contains: '::error title=Release notes say no note is needed::' });
+check('empty-block annotation carries a title',
+    pr('```release-note\n\n```'),
+    { code: 1, contains: '::error title=Release notes are empty::' });
+check('event-guard annotation carries a title',
+    { push: {} },
+    { code: 1, contains: '::error title=Release notes check could not run::' });
+
 fs.rmSync(tmp, { recursive: true, force: true });
 
 console.log(failures === 0 ? '\nAll tests passed.' : '\n' + failures + ' test(s) failed.');

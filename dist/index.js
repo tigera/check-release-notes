@@ -72,8 +72,21 @@ function escapeCommandData(value) {
         .replace(/\n/g, '%0A');
 }
 
-function setFailed(message) {
-    process.stdout.write('::error::' + escapeCommandData(message) + '\n');
+// Property values sit inside the command's parameter list, so ':' and ',' need
+// encoding on top of the data escapes or they would end the value early.
+function escapeCommandProperty(value) {
+    return escapeCommandData(value)
+        .replace(/:/g, '%3A')
+        .replace(/,/g, '%2C');
+}
+
+// The annotation title becomes the heading GitHub shows above the message in
+// the Checks tab. Without it every annotation is headed with a bare "Error".
+// It has no effect on the "Failing after 3s" line on the PR page: that text
+// belongs to the workflow's own check run and the runner owns it.
+function setFailed(message, title) {
+    const properties = title ? ' title=' + escapeCommandProperty(title) : '';
+    process.stdout.write('::error' + properties + '::' + escapeCommandData(message) + '\n');
     process.exitCode = 1;
 }
 
@@ -180,26 +193,39 @@ function classify(notes) {
 
 // A block counts as valid only if it holds a real note, so a PR that leaves a
 // stale "TBD" above its actual notes still passes. When nothing is valid, the
-// message describes the first block, which is the one the author most likely
-// meant to fill in.
+// failure describes the first block, which is the one the author most likely
+// meant to fill in. Returns null on success, or a {title, message} pair: the
+// title heads the annotation, the message says what to do about it.
 function validate(blocks, labelName) {
     if (blocks.length === 0) {
-        return 'No release notes found in PR body';
+        return {
+            title: 'No release notes',
+            message: 'No release notes found in PR body',
+        };
     }
 
     const kinds = blocks.map(classify);
     if (kinds.includes('note')) {
-        return '';
+        return null;
     }
 
     switch (kinds[0]) {
         case 'placeholder':
-            return 'Release notes are still a placeholder. Replace it with an actual release note.';
+            return {
+                title: 'Release notes are still a placeholder',
+                message: 'Release notes are still a placeholder. Replace it with an actual release note.',
+            };
         case 'negation':
-            return 'Release notes say no note is needed, which is not a release note. ' +
-                'Write an actual release note, or remove the ' + labelName + ' label from this PR.';
+            return {
+                title: 'Release notes say no note is needed',
+                message: 'Release notes say no note is needed, which is not a release note. ' +
+                    'Write an actual release note, or remove the ' + labelName + ' label from this PR.',
+            };
         default:
-            return 'Release notes are empty';
+            return {
+                title: 'Release notes are empty',
+                message: 'Release notes are empty',
+            };
     }
 }
 
@@ -221,26 +247,26 @@ try {
     const pullRequest = readPullRequest();
     const labelNames = (pullRequest.labels || []).map(item => item.name);
 
-    let failureMessage = '';
+    let failure = null;
 
     if (labelNames.includes(labelName)) {
-        failureMessage = validate(findReleaseNoteBlocks(pullRequest.body), labelName);
+        failure = validate(findReleaseNoteBlocks(pullRequest.body), labelName);
     } else {
         console.log('Label ' + labelName + ' not present, skipping validation');
     }
 
-    if (failureMessage !== '') {
+    if (failure) {
         if (pullRequest.draft === true) {
-            console.log('[draft] PR contained the following issue: ' + failureMessage);
+            console.log('[draft] PR contained the following issue: ' + failure.message);
         } else {
-            setFailed('An error was found: ' + failureMessage);
+            setFailed(failure.message, failure.title);
         }
     } else {
         console.log('No errors detected in release notes.');
     }
 
 } catch (error) {
-    setFailed(error.message);
+    setFailed(error.message, 'Release notes check could not run');
 }
 
 module.exports = __webpack_exports__;
