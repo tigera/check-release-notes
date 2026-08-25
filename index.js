@@ -35,9 +35,15 @@ function escapeCommandProperty(value) {
 // the Checks tab. Without it every annotation is headed with a bare "Error".
 // It has no effect on the "Failing after 3s" line on the PR page: that text
 // belongs to the workflow's own check run and the runner owns it.
-function setFailed(message, title) {
+function annotate(kind, message, title) {
     const properties = title ? ' title=' + escapeCommandProperty(title) : '';
-    process.stdout.write('::error' + properties + '::' + escapeCommandData(message) + '\n');
+    process.stdout.write('::' + kind + properties + '::' + escapeCommandData(message) + '\n');
+}
+
+// Failing the step is the fallback route, taken only when the "Release notes"
+// check run could not be created. Nothing else left can block the pull request.
+function setFailed(message, title) {
+    annotate('error', message, title);
     process.exitCode = 1;
 }
 
@@ -215,10 +221,12 @@ function validate(blocks, labelName) {
 // creates itself does have a line the action controls: its output title. That
 // is what puts the reason on the PR page without anyone opening Details.
 //
-// This is strictly an extra. Creating it needs a token with checks: write,
-// which is not available on a pull_request event from a fork, so every failure
-// here is logged and stepped over. The verdict comes from the validation
-// above, never from whether GitHub accepted this call.
+// So this check run, not the step's exit code, is where a failure is reported
+// whenever it can be created. Creating it needs a token with checks: write,
+// which is not available on a pull_request event from a fork; when that fails
+// the reason is logged and the step falls back to exiting non-zero. Either way
+// the verdict comes from the validation above, never from whether GitHub
+// accepted this call.
 const CHECK_NAME = 'Release notes';
 const CHECK_RUN_TIMEOUT_MS = 10000;
 
@@ -239,24 +247,23 @@ function skipReason(status) {
 }
 
 function skipped(detail) {
-    console.log('Skipped the "' + CHECK_NAME + '" check run: ' + detail +
-        ' The result reported above is unaffected.');
+    console.log('Skipped the "' + CHECK_NAME + '" check run: ' + detail);
+    return false;
 }
 
+// Returns true only once GitHub has accepted the check run, because the caller
+// decides whether to fail the step on the strength of that answer.
 async function createCheckRun(report, headSha) {
     const token = getInput('github-token') || process.env.GITHUB_TOKEN || '';
     if (!token) {
-        skipped('no github-token was supplied. Pass one and grant checks: write ' +
+        return skipped('no github-token was supplied. Pass one and grant checks: write ' +
             'to show the reason on the pull request page itself.');
-        return;
     }
     if (!process.env.GITHUB_REPOSITORY) {
-        skipped('GITHUB_REPOSITORY is not set.');
-        return;
+        return skipped('GITHUB_REPOSITORY is not set.');
     }
     if (!headSha) {
-        skipped('the event payload has no head SHA.');
-        return;
+        return skipped('the event payload has no head SHA.');
     }
 
     const url = (process.env.GITHUB_API_URL || 'https://api.github.com') +
@@ -286,16 +293,15 @@ async function createCheckRun(report, headSha) {
         });
     } catch (error) {
         // Offline runner, blocked egress, DNS failure, or the timeout above.
-        skipped('the request to GitHub failed (' + error.message + ').');
-        return;
+        return skipped('the request to GitHub failed (' + error.message + ').');
     }
 
     if (!response.ok) {
-        skipped('GitHub answered HTTP ' + response.status + '. ' + skipReason(response.status));
-        return;
+        return skipped('GitHub answered HTTP ' + response.status + '. ' + skipReason(response.status));
     }
 
     console.log('Reported "' + report.title + '" on the "' + CHECK_NAME + '" check run.');
+    return true;
 }
 
 function readPullRequest() {
@@ -351,10 +357,10 @@ function report(pullRequest, labelName) {
         };
     }
 
-    setFailed(failure.message, failure.title);
     return {
         conclusion: 'failure',
         title: failure.title,
+        message: failure.message,
         summary: '## Release notes: failed\n\n' +
             '**' + failure.title + '**\n\n' + failure.message + '\n\n' + EXAMPLE,
     };
@@ -369,16 +375,35 @@ async function main() {
         pullRequest = readPullRequest();
         result = report(pullRequest, labelName);
     } catch (error) {
-        setFailed(error.message, 'Release notes check could not run');
         result = {
             conclusion: 'failure',
             title: 'Release notes check could not run',
+            message: error.message,
             summary: '## Release notes: could not run\n\n' + error.message,
         };
     }
 
     writeSummary(result.summary);
-    await createCheckRun(result, pullRequest && pullRequest.head && pullRequest.head.sha);
+    const reported = await createCheckRun(
+        result, pullRequest && pullRequest.head && pullRequest.head.sha);
+
+    if (result.conclusion !== 'failure') {
+        return;
+    }
+
+    // A failure has to land on a check the pull request can be blocked on. The
+    // check run is the better of the two, because its title puts the reason on
+    // the PR page, while this job's own line reads "Failing after 3s" whatever
+    // it does. So the step exits non-zero only when that check run is missing.
+    if (reported) {
+        annotate('notice', result.message, result.title);
+        console.log('The "' + CHECK_NAME + '" check run carries this failure, so this job ' +
+            'succeeds. Make "' + CHECK_NAME + '" a required check for it to block merges.');
+        return;
+    }
+
+    console.log('Failing this job instead, because there is nothing else left to report on.');
+    setFailed(result.message, result.title);
 }
 
 // Nothing in main() is expected to reject, but an unhandled rejection would

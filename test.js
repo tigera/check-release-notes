@@ -59,6 +59,7 @@ function check(name, payload, expected, options = {}) {
     const maxMs = options.maxMs || 10000;
     const ok = result.code === expected.code &&
         result.out.includes(expected.contains) &&
+        (expected.excludes === undefined || !result.out.includes(expected.excludes)) &&
         (expected.summaryContains === undefined || result.summary.includes(expected.summaryContains)) &&
         result.ms <= maxMs;
 
@@ -69,7 +70,9 @@ function check(name, payload, expected, options = {}) {
         (ok ? 'PASS  ' : 'FAIL  ') + name +
         '  [exit=' + result.code + ' ' + result.ms.toFixed(0) + 'ms]' +
         (ok ? '' : '\n      expected exit=' + expected.code + ' containing ' +
-            JSON.stringify(expected.contains) + ', got: ' + JSON.stringify(result.out.slice(0, 200))) +
+            JSON.stringify(expected.contains) +
+            (expected.excludes === undefined ? '' : ' and not ' + JSON.stringify(expected.excludes)) +
+            ', got: ' + JSON.stringify(result.out.slice(0, 200))) +
         (ok || expected.summaryContains === undefined ? '' :
             '\n      expected summary containing ' + JSON.stringify(expected.summaryContains) +
             ', got: ' + JSON.stringify(result.summary.slice(0, 200)))
@@ -287,18 +290,22 @@ function startStub(status) {
 
 const REPO_ENV = { GITHUB_REPOSITORY: 'tigera/check-release-notes' };
 
-// Without a token the action must say so and otherwise behave exactly as before.
-check('no token skips the check run without changing the verdict',
+// Without a token there is no check run to report on, so the step itself has to
+// fail: that is the only signal left that can block the pull request.
+check('no token falls back to failing the job',
     pr('```release-note\nTBD\n```'),
     { code: 1, contains: 'Skipped the "Release notes" check run: no github-token' });
+check('no token fallback still annotates as an error',
+    pr('```release-note\nTBD\n```'),
+    { code: 1, contains: '::error title=Release notes are still a placeholder::' });
 check('no token still passes a good PR',
     pr('```release-note\nReal note\n```'),
     { code: 0, contains: 'no github-token' });
 
 const accepting = startStub(201);
-check('failure posts a check run and keeps failing',
+check('failure reports on the check run and lets the job succeed',
     pr('```release-note\nNONE\n```'),
-    { code: 1, contains: 'Reported "Release notes say no note is needed"' },
+    { code: 0, contains: 'Reported "Release notes say no note is needed"' },
     { env: { ...REPO_ENV, GITHUB_API_URL: accepting.url, GITHUB_TOKEN: 'stub-token' } });
 
 const posted = accepting.requests();
@@ -321,6 +328,23 @@ expect('check run concludes as a failure', body.conclusion, 'failure');
 expect('check run title carries the reason to the PR page',
     body.output && body.output.title, 'Release notes say no note is needed');
 
+// A green job alongside a red check run needs the log to explain itself, and it
+// must not carry an error annotation: that is what makes the job green at all.
+check('a reported failure annotates as a notice, never an error',
+    pr('```release-note\nNONE\n```'),
+    {
+        code: 0,
+        contains: '::notice title=Release notes say no note is needed::',
+        excludes: '::error',
+    },
+    { env: { ...REPO_ENV, GITHUB_API_URL: accepting.url, GITHUB_TOKEN: 'stub-token' } });
+check('a reported failure names the check to make required',
+    pr('Just a description'),
+    { code: 0, contains: 'Make "Release notes" a required check' },
+    { env: { ...REPO_ENV, GITHUB_API_URL: accepting.url, GITHUB_TOKEN: 'stub-token' } });
+expect('a reported failure still concludes the check run as a failure',
+    JSON.parse(accepting.requests().pop().body).conclusion, 'failure');
+
 check('a passing PR concludes as a success',
     pr('```release-note\nReal note\n```'),
     { code: 0, contains: 'Reported "Release note found"' },
@@ -338,13 +362,17 @@ accepting.stop();
 
 // A read-only token, which is what a pull_request event from a fork gets.
 const forbidding = startStub(403);
-check('a read-only token degrades to a log line',
+check('a read-only token falls back to failing the job',
     pr('```release-note\nTBD\n```'),
     { code: 1, contains: 'GitHub answered HTTP 403' },
     { env: { ...REPO_ENV, GITHUB_API_URL: forbidding.url, GITHUB_TOKEN: 'read-only-token' } });
+check('the fallback annotates as an error and says why it fired',
+    pr('```release-note\nTBD\n```'),
+    { code: 1, contains: 'Failing this job instead' },
+    { env: { ...REPO_ENV, GITHUB_API_URL: forbidding.url, GITHUB_TOKEN: 'read-only-token' } });
 check('a read-only token does not turn a passing PR into a failure',
     pr('```release-note\nReal note\n```'),
-    { code: 0, contains: 'The result reported above is unaffected' },
+    { code: 0, contains: 'The token is read-only' },
     { env: { ...REPO_ENV, GITHUB_API_URL: forbidding.url, GITHUB_TOKEN: 'read-only-token' } });
 forbidding.stop();
 
