@@ -7,12 +7,12 @@ inputs:
     default: 'release-note-required'
   github-token:
     description: >
-      Token used to publish a separate "Release notes" check run, whose title
-      shows the reason on the pull request page. Needs checks: write. When the
-      check run is created it carries the verdict and this step succeeds even
-      on a failure, so make "Release notes" the required check. Optional:
-      without a token, or with the read-only token a fork PR gets, the action
-      logs why and fails the step instead.
+      Token used to publish a separate "Release notes" commit status, whose
+      description shows the reason on the pull request page. Needs
+      statuses: write. When the status is created it carries the verdict and
+      this step succeeds even on a failure, so make "Release notes" the
+      required status check. Optional: without a token, or with the read-only
+      token a fork PR gets, the action logs why and fails the step instead.
     required: false
 runs:
   using: 'node24'

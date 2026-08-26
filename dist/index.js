@@ -266,18 +266,51 @@ function validate(blocks, labelName) {
 }
 
 // The runner owns the "Failing after 3s" line under the workflow's own check
-// run, and nothing the action prints can change it. A check run this action
-// creates itself does have a line the action controls: its output title. That
-// is what puts the reason on the PR page without anyone opening Details.
+// run, and nothing the action prints can change it. A check this action creates
+// itself does have a line the action controls, and that is what puts the reason
+// on the PR page without anyone opening Details.
 //
-// So this check run, not the step's exit code, is where a failure is reported
-// whenever it can be created. Creating it needs a token with checks: write,
+// That check is a commit status rather than a check run. A check run carries a
+// richer output, but POST /check-runs cannot say which check suite to file it
+// under: GitHub attaches it to the suite the app already has for the head SHA,
+// which is the oldest one. Every re-run of the workflow on that SHA opens a
+// newer suite, so from the second run onwards the check run lands in a suite
+// the pull request page treats as superseded and hides. The failure is then
+// invisible and blocks nothing, which is exactly what it exists to do.
+// A commit status belongs to no suite, so nothing can supersede it.
+//
+// So this status, not the step's exit code, is where a failure is reported
+// whenever it can be created. Creating it needs a token with statuses: write,
 // which is not available on a pull_request event from a fork; when that fails
 // the reason is logged and the step falls back to exiting non-zero. Either way
 // the verdict comes from the validation above, never from whether GitHub
 // accepted this call.
-const CHECK_NAME = 'Release notes';
-const CHECK_RUN_TIMEOUT_MS = 10000;
+const STATUS_CONTEXT = 'Release notes';
+const STATUS_TIMEOUT_MS = 10000;
+
+// GitHub rejects a longer description outright. Every title above is well
+// inside this, so the guard exists to keep a future one from failing the POST.
+const DESCRIPTION_LIMIT = 140;
+
+function truncate(text) {
+    return text.length <= DESCRIPTION_LIMIT ? text : text.slice(0, DESCRIPTION_LIMIT - 1) + '…';
+}
+
+// A commit status has no neutral state, so a draft reports success and leans on
+// the description to say the check is not being enforced yet.
+function statusState(conclusion) {
+    return conclusion === 'failure' ? 'failure' : 'success';
+}
+
+// "Details" beside the status leads to the run page, which is where the job
+// summary written above is rendered.
+function targetUrl() {
+    if (!process.env.GITHUB_RUN_ID) {
+        return undefined;
+    }
+    return (process.env.GITHUB_SERVER_URL || 'https://github.com') +
+        '/' + process.env.GITHUB_REPOSITORY + '/actions/runs/' + process.env.GITHUB_RUN_ID;
+}
 
 function skipReason(status) {
     switch (status) {
@@ -285,27 +318,27 @@ function skipReason(status) {
             return 'The token is invalid or has expired.';
         case 403:
             return 'The token is read-only, which is what a pull_request event from a fork ' +
-                'gets. Use pull_request_target if the check run is needed on fork PRs.';
+                'gets. Use pull_request_target if the status is needed on fork PRs.';
         case 404:
-            return 'The token is missing checks: write, or cannot see this repository.';
+            return 'The token is missing statuses: write, or cannot see this repository.';
         case 422:
-            return 'GitHub rejected the check run; the head SHA may not belong to this repository.';
+            return 'GitHub rejected the status; the head SHA may not belong to this repository.';
         default:
             return '';
     }
 }
 
 function skipped(detail) {
-    console.log('Skipped the "' + CHECK_NAME + '" check run: ' + detail);
+    console.log('Skipped the "' + STATUS_CONTEXT + '" commit status: ' + detail);
     return false;
 }
 
-// Returns true only once GitHub has accepted the check run, because the caller
+// Returns true only once GitHub has accepted the status, because the caller
 // decides whether to fail the step on the strength of that answer.
-async function createCheckRun(report, headSha) {
+async function createStatus(report, headSha) {
     const token = getInput('github-token') || process.env.GITHUB_TOKEN || '';
     if (!token) {
-        return skipped('no github-token was supplied. Pass one and grant checks: write ' +
+        return skipped('no github-token was supplied. Pass one and grant statuses: write ' +
             'to show the reason on the pull request page itself.');
     }
     if (!process.env.GITHUB_REPOSITORY) {
@@ -316,7 +349,7 @@ async function createCheckRun(report, headSha) {
     }
 
     const url = (process.env.GITHUB_API_URL || 'https://api.github.com') +
-        '/repos/' + process.env.GITHUB_REPOSITORY + '/check-runs';
+        '/repos/' + process.env.GITHUB_REPOSITORY + '/statuses/' + headSha;
 
     let response;
     try {
@@ -330,15 +363,14 @@ async function createCheckRun(report, headSha) {
                 'user-agent': 'check-release-notes',
             },
             body: JSON.stringify({
-                name: CHECK_NAME,
-                head_sha: headSha,
-                status: 'completed',
-                conclusion: report.conclusion,
-                // The title is the line GitHub shows beside the check name on
-                // the pull request page.
-                output: { title: report.title, summary: report.summary },
+                context: STATUS_CONTEXT,
+                state: statusState(report.conclusion),
+                // The description is the line GitHub shows beside the context
+                // on the pull request page.
+                description: truncate(report.title),
+                target_url: targetUrl(),
             }),
-            signal: AbortSignal.timeout(CHECK_RUN_TIMEOUT_MS),
+            signal: AbortSignal.timeout(STATUS_TIMEOUT_MS),
         });
     } catch (error) {
         // Offline runner, blocked egress, DNS failure, or the timeout above.
@@ -349,7 +381,7 @@ async function createCheckRun(report, headSha) {
         return skipped('GitHub answered HTTP ' + response.status + '. ' + skipReason(response.status));
     }
 
-    console.log('Reported "' + report.title + '" on the "' + CHECK_NAME + '" check run.');
+    console.log('Reported "' + report.title + '" on the "' + STATUS_CONTEXT + '" commit status.');
     return true;
 }
 
@@ -433,7 +465,7 @@ async function main() {
     }
 
     writeSummary(result.summary);
-    const reported = await createCheckRun(
+    const reported = await createStatus(
         result, pullRequest && pullRequest.head && pullRequest.head.sha);
 
     if (result.conclusion !== 'failure') {
@@ -441,13 +473,14 @@ async function main() {
     }
 
     // A failure has to land on a check the pull request can be blocked on. The
-    // check run is the better of the two, because its title puts the reason on
-    // the PR page, while this job's own line reads "Failing after 3s" whatever
-    // it does. So the step exits non-zero only when that check run is missing.
+    // commit status is the better of the two, because its description puts the
+    // reason on the PR page, while this job's own line reads "Failing after 3s"
+    // whatever it does. So the step exits non-zero only when the status is
+    // missing.
     if (reported) {
         annotate('notice', result.message, result.title);
-        console.log('The "' + CHECK_NAME + '" check run carries this failure, so this job ' +
-            'succeeds. Make "' + CHECK_NAME + '" a required check for it to block merges.');
+        console.log('The "' + STATUS_CONTEXT + '" commit status carries this failure, so this job ' +
+            'succeeds. Make "' + STATUS_CONTEXT + '" a required status check for it to block merges.');
         return;
     }
 

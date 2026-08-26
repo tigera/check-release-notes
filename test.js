@@ -23,7 +23,7 @@ function run(payload, { label = 'release-note-required', env = {} } = {}) {
     let out = '';
 
     // A GITHUB_TOKEN inherited from the developer's shell would send these
-    // runs at the real API, so the check-run credentials are always explicit.
+    // runs at the real API, so the status credentials are always explicit.
     const childEnv = {
         ...process.env,
         GITHUB_EVENT_PATH: eventPath,
@@ -34,6 +34,10 @@ function run(payload, { label = 'release-note-required', env = {} } = {}) {
     delete childEnv['INPUT_GITHUB-TOKEN'];
     delete childEnv.GITHUB_API_URL;
     delete childEnv.GITHUB_REPOSITORY;
+    // Set when these tests are themselves run by Actions, where they would
+    // otherwise leak the outer run's URL into the status under test.
+    delete childEnv.GITHUB_SERVER_URL;
+    delete childEnv.GITHUB_RUN_ID;
     Object.assign(childEnv, env);
 
     try {
@@ -234,8 +238,9 @@ check('event-guard writes a summary',
         summaryContains: '## Release notes: could not run',
     });
 
-// Check run. The stub API has to be its own process: execFileSync blocks this
-// one's event loop, so a server listening here would never answer the child.
+// Commit status. The stub API has to be its own process: execFileSync blocks
+// this one's event loop, so a server listening here would never answer the
+// child.
 const STUB = path.join(tmp, 'stub-api.js');
 fs.writeFileSync(STUB, [
     "const fs = require('fs');",
@@ -288,13 +293,17 @@ function startStub(status) {
     throw new Error('stub API did not start');
 }
 
-const REPO_ENV = { GITHUB_REPOSITORY: 'tigera/check-release-notes' };
+const REPO_ENV = {
+    GITHUB_REPOSITORY: 'tigera/check-release-notes',
+    GITHUB_SERVER_URL: 'https://github.example',
+    GITHUB_RUN_ID: '42',
+};
 
-// Without a token there is no check run to report on, so the step itself has to
+// Without a token there is no status to report on, so the step itself has to
 // fail: that is the only signal left that can block the pull request.
 check('no token falls back to failing the job',
     pr('```release-note\nTBD\n```'),
-    { code: 1, contains: 'Skipped the "Release notes" check run: no github-token' });
+    { code: 1, contains: 'Skipped the "Release notes" commit status: no github-token' });
 check('no token fallback still annotates as an error',
     pr('```release-note\nTBD\n```'),
     { code: 1, contains: '::error title=Release notes are still a placeholder::' });
@@ -303,7 +312,7 @@ check('no token still passes a good PR',
     { code: 0, contains: 'no github-token' });
 
 const accepting = startStub(201);
-check('failure reports on the check run and lets the job succeed',
+check('failure reports on the status and lets the job succeed',
     pr('```release-note\nNONE\n```'),
     { code: 0, contains: 'Reported "Release notes say no note is needed"' },
     { env: { ...REPO_ENV, GITHUB_API_URL: accepting.url, GITHUB_TOKEN: 'stub-token' } });
@@ -318,17 +327,22 @@ function expect(name, actual, wanted) {
     console.log((ok ? 'PASS  ' : 'FAIL  ') + name +
         (ok ? '' : '\n      expected ' + JSON.stringify(wanted) + ', got ' + JSON.stringify(actual)));
 }
-expect('check run is POSTed to the check-runs endpoint',
+// The status has to be POSTed against the head SHA itself. A check run took a
+// head_sha in its body and GitHub filed it under whichever check suite it liked,
+// which is the bug this endpoint avoids.
+expect('status is POSTed to the head SHA on the statuses endpoint',
     posted.length && posted[posted.length - 1].method + ' ' + posted[posted.length - 1].url,
-    'POST /repos/tigera/check-release-notes/check-runs');
-expect('check run authenticates with the supplied token',
+    'POST /repos/tigera/check-release-notes/statuses/' + HEAD_SHA);
+expect('status authenticates with the supplied token',
     posted.length && posted[posted.length - 1].authorization, 'Bearer stub-token');
-expect('check run is anchored to the head SHA', body.head_sha, HEAD_SHA);
-expect('check run concludes as a failure', body.conclusion, 'failure');
-expect('check run title carries the reason to the PR page',
-    body.output && body.output.title, 'Release notes say no note is needed');
+expect('status names the context the PR can be blocked on', body.context, 'Release notes');
+expect('status reports a failure', body.state, 'failure');
+expect('status description carries the reason to the PR page',
+    body.description, 'Release notes say no note is needed');
+expect('status links to the run page, where the job summary is',
+    body.target_url, 'https://github.example/tigera/check-release-notes/actions/runs/42');
 
-// A green job alongside a red check run needs the log to explain itself, and it
+// A green job alongside a red status needs the log to explain itself, and it
 // must not carry an error annotation: that is what makes the job green at all.
 check('a reported failure annotates as a notice, never an error',
     pr('```release-note\nNONE\n```'),
@@ -340,25 +354,47 @@ check('a reported failure annotates as a notice, never an error',
     { env: { ...REPO_ENV, GITHUB_API_URL: accepting.url, GITHUB_TOKEN: 'stub-token' } });
 check('a reported failure names the check to make required',
     pr('Just a description'),
-    { code: 0, contains: 'Make "Release notes" a required check' },
+    { code: 0, contains: 'Make "Release notes" a required status check' },
     { env: { ...REPO_ENV, GITHUB_API_URL: accepting.url, GITHUB_TOKEN: 'stub-token' } });
-expect('a reported failure still concludes the check run as a failure',
-    JSON.parse(accepting.requests().pop().body).conclusion, 'failure');
+expect('a reported failure still sets the status to failure',
+    JSON.parse(accepting.requests().pop().body).state, 'failure');
 
-check('a passing PR concludes as a success',
+check('a passing PR reports a success',
     pr('```release-note\nReal note\n```'),
     { code: 0, contains: 'Reported "Release note found"' },
     { env: { ...REPO_ENV, GITHUB_API_URL: accepting.url, GITHUB_TOKEN: 'stub-token' } });
-expect('passing check run concludes as a success',
-    JSON.parse(accepting.requests().pop().body).conclusion, 'success');
+expect('passing status is a success', JSON.parse(accepting.requests().pop().body).state, 'success');
 
-check('a draft concludes as neutral rather than failing',
+// A commit status has no neutral state, so a draft passes and says why in the
+// description rather than blocking a pull request that is still being written.
+check('a draft passes rather than failing',
     pr('```release-note\nTBD\n```', { draft: true }),
     { code: 0, contains: 'Reported "Not enforced while this pull request is a draft"' },
     { env: { ...REPO_ENV, GITHUB_API_URL: accepting.url, GITHUB_TOKEN: 'stub-token' } });
-expect('draft check run concludes as neutral',
-    JSON.parse(accepting.requests().pop().body).conclusion, 'neutral');
+const draftBody = JSON.parse(accepting.requests().pop().body);
+expect('draft status is a success', draftBody.state, 'success');
+expect('draft description says the check is not enforced',
+    draftBody.description, 'Not enforced while this pull request is a draft');
+
 accepting.stop();
+
+// A run outside Actions has no run ID, so there is no run page to link to. The
+// key is omitted rather than sent as a broken URL.
+const noRunId = startStub(201);
+check('a missing run ID still reports the status',
+    pr('```release-note\nReal note\n```'),
+    { code: 0, contains: 'Reported "Release note found"' },
+    {
+        env: {
+            GITHUB_REPOSITORY: 'tigera/check-release-notes',
+            GITHUB_API_URL: noRunId.url,
+            GITHUB_TOKEN: 'stub-token',
+        },
+    });
+expect('a missing run ID omits target_url',
+    Object.prototype.hasOwnProperty.call(JSON.parse(noRunId.requests().pop().body), 'target_url'),
+    false);
+noRunId.stop();
 
 // A read-only token, which is what a pull_request event from a fork gets.
 const forbidding = startStub(403);
@@ -377,9 +413,9 @@ check('a read-only token does not turn a passing PR into a failure',
 forbidding.stop();
 
 const missing = startStub(404);
-check('a token without checks: write degrades to a log line',
+check('a token without statuses: write degrades to a log line',
     pr('```release-note\nTBD\n```'),
-    { code: 1, contains: 'missing checks: write' },
+    { code: 1, contains: 'missing statuses: write' },
     { env: { ...REPO_ENV, GITHUB_API_URL: missing.url, GITHUB_TOKEN: 'weak-token' } });
 missing.stop();
 
@@ -389,11 +425,11 @@ check('an unreachable API degrades to a log line',
     { code: 1, contains: 'the request to GitHub failed' },
     { env: { ...REPO_ENV, GITHUB_API_URL: 'http://127.0.0.1:1', GITHUB_TOKEN: 'stub-token' } });
 
-check('a payload with no head SHA skips the check run',
+check('a payload with no head SHA skips the status',
     { pull_request: { labels: [{ name: 'release-note-required' }], body: '', draft: false } },
     { code: 1, contains: 'the event payload has no head SHA' },
     { env: { ...REPO_ENV, GITHUB_TOKEN: 'stub-token' } });
-check('a missing GITHUB_REPOSITORY skips the check run',
+check('a missing GITHUB_REPOSITORY skips the status',
     pr('```release-note\nTBD\n```'),
     { code: 1, contains: 'GITHUB_REPOSITORY is not set' },
     { env: { GITHUB_TOKEN: 'stub-token' } });
